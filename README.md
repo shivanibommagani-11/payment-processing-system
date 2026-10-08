@@ -112,3 +112,27 @@ Testing & Verification1. Submit a Payment (PowerShell)PowerShellInvoke-RestMetho
 3. Verify Idempotency Duplicate RejectionRun the same request again immediately using the same X-Idempotency-Key. Notice that the API returns the original cached response payload without re-executing or double-charging.4. Check Transaction & Ledger Status in DatabasePowerShellpython -c "import psycopg2; conn = psycopg2.connect(host='localhost', port=5432, user='postgres', password='Incedo@1234', dbname='payments_db'); cur = conn.cursor(); cur.execute('SELECT transaction_id, status, amount FROM transactions'); print('TRANSACTIONS:', cur.fetchall()); cur.execute('SELECT * FROM ledger_entries'); print('LEDGERS:', cur.fetchall())"
 5. Run Daily Reconciliation ReportPowerShellpython -m app.reconciliation
 Key Interview Talking Points1. Architectural Trade-offs & Constraint SatisfactionContext: Restricted enterprise desktop environment without admin privileges, Docker containers, or Redis/Celery background daemons.Solution: Swapped Redis with DiskCache (POSIX/Windows file-locking backed by SQLite) and substituted Celery workers with FastAPI in-memory BackgroundTasks.2. Eliminating Race Conditions & Double-SpendingUtilized DiskCache.add() which acts as an atomic operation (SETNX equivalent in Redis).If two identical requests arrive simultaneously, only one acquires the mutex lock; the secondary request receives a 409 Conflict.3. Financial Consistency & ACID ComplianceLeveraged PostgreSQL transaction blocks (BEGIN...COMMIT/ROLLBACK).Status transitions (PENDING $\rightarrow$ PROCESSING $\rightarrow$ SUCCESS) occur inside transaction blocks alongside ledger inserts, ensuring no ghost transactions exist without audit records.4. Scalability PathThe system is horizontally scalable:Replace DiskCache with a shared Redis cluster for multi-node locking.Replace BackgroundTasks with RabbitMQ / Kafka for durable distributed message queuing.Web nodes remain 100% stateless.
+
+
+In our payment processing system, rate limiting and concurrency control were handled through Distributed Idempotency Locking using DiskCache and the X-Idempotency-Key header.Instead of just capping requests per minute (like traditional rate limiters), payment systems require strict concurrency suppression—ensuring a user cannot execute two identical charge operations simultaneously even if they click "Pay" 5 times within a single second.How We Implemented It Step-by-Step1. Unique Key ExtractionThe client sends a unique identifier in the HTTP request header:X-Idempotency-Key: tx_unique_1012. Atomic Mutex Locking (local_cache.add)In app/main.py, we construct a lock key (lock:tx_unique_101) and perform an atomic insertion check using SQLite-backed DiskCache:Python# app/main.py
+
+idempotency_key = request.headers.get("X-Idempotency-Key")
+cache_key = f"idempotency:{idempotency_key}"
+lock_key = f"lock:{idempotency_key}"
+
+# 1. Check if the transaction already completed earlier
+cached_response = local_cache.get(cache_key)
+if cached_response:
+    return JSONResponse(status_code=200, content=json.loads(cached_response))
+
+# 2. ATOMIC LOCK: Try to set the key in cache (acts as SETNX in Redis)
+# expire=10 locks the transaction window for 10 seconds
+acquired = local_cache.add(lock_key, "LOCKED", expire=10)
+
+if not acquired:
+    # A request with this EXACT key is currently processing in background
+    raise HTTPException(
+        status_code=409, 
+        detail="A transaction with this idempotency key is already in progress."
+    )
+The Three Operational OutingsScenarioIncoming Request StateSystem Action & ResponseNew Payment RequestKey does not exist in DiskCache.Lock is acquired (acquired = True), record saved as PENDING in PostgreSQL, background job triggered, returns 202 Accepted.Concurrent Double-Click (0-10s)Key exists as "LOCKED".Second request fails lock acquisition (acquired = False) and is instantly rejected with 409 Conflict.Retry After Completion (>10s)Key exists in cache with full payload saved.Returns saved 200 OK response instantly from cache without touching PostgreSQL or the payment gateway again.Why This Architecture Was ChosenSub-millisecond Check: Checking DiskCache takes less than 1ms, preventing database connections from filling up during rapid client retries.No Third-Party Daemons: Using DiskCache enabled POSIX file-locking semantics natively in Python on Windows/Linux without needing an admin-installed Redis server.ACID Safety: Guarantees that the payment gateway is called at most once (AMON) per financial request.
