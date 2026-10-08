@@ -1,0 +1,44 @@
+# Environment variables and secrets (DO NOT COMMIT)
+.env
+.env.*
+*.env
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Python compiled files & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# DiskCache local storage
+.cache/
+*.db-shm
+*.db-wal
+
+# Local SQLite databases (if testing locally)
+*.db
+*.sqlite3
+
+# IDE / Editor configuration
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Logs & temporary files
+*.log
+logs/
+*.tmp
